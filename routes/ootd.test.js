@@ -1,9 +1,12 @@
 const jwt = require("jsonwebtoken");
 
 const mockGenerateOotdSuggestions = jest.fn();
+const mockGenerateOotdImage = jest.fn();
 class MockGeminiError extends Error {}
 jest.mock("../utils/gemini", () => ({
   generateOotdSuggestions: mockGenerateOotdSuggestions,
+  generateOotdImage: mockGenerateOotdImage,
+  OOTD_OCCASIONS: ["Work", "Date", "Casual", "Dinner Night"],
   GeminiError: MockGeminiError,
 }));
 
@@ -37,6 +40,7 @@ const weather = { temperatureC: 15, condition: "Cloudy", location: "London" };
 
 beforeEach(() => {
   mockGenerateOotdSuggestions.mockReset();
+  mockGenerateOotdImage.mockReset();
 });
 
 describe("POST /api/ootd/suggest", () => {
@@ -134,6 +138,101 @@ describe("POST /api/ootd/suggest", () => {
       .post("/api/ootd/suggest")
       .set("Authorization", `Bearer ${validToken}`)
       .send({ items: fullWardrobe, weather });
+
+    expect(res.status).toBe(502);
+  });
+});
+
+describe("POST /api/ootd/image", () => {
+  function makeImageItem(category) {
+    return { category, image: "base64data", mimeType: "image/jpeg" };
+  }
+
+  const imageItems = [makeImageItem("Top"), makeImageItem("Bottom"), makeImageItem("Shoes")];
+  const body = { occasion: "Work", note: "Crisp and put-together.", items: imageItems, weather };
+
+  it("rejects requests without a bearer token", async () => {
+    const res = await request(app).post("/api/ootd/image").send(body);
+
+    expect(res.status).toBe(401);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid occasion", async () => {
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send({ ...body, occasion: "Brunch" });
+
+    expect(res.status).toBe(400);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing items array", async () => {
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send({ ...body, items: [] });
+
+    expect(res.status).toBe(400);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an item missing a base64 image", async () => {
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send({ ...body, items: [{ category: "Top", mimeType: "image/jpeg" }] });
+
+    expect(res.status).toBe(400);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unsupported mime type", async () => {
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send({ ...body, items: [{ category: "Top", image: "base64data", mimeType: "image/gif" }] });
+
+    expect(res.status).toBe(400);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing weather", async () => {
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send({ occasion: body.occasion, note: body.note, items: body.items });
+
+    expect(res.status).toBe(400);
+    expect(mockGenerateOotdImage).not.toHaveBeenCalled();
+  });
+
+  it("returns the composed image Gemini produces for a valid request", async () => {
+    mockGenerateOotdImage.mockResolvedValue({ image: "generatedbase64", mimeType: "image/png" });
+
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ image: "generatedbase64", mimeType: "image/png" });
+    expect(mockGenerateOotdImage).toHaveBeenCalledWith({
+      occasion: "Work",
+      note: "Crisp and put-together.",
+      items: imageItems,
+      weather,
+    });
+  });
+
+  it("returns 502 when Gemini fails", async () => {
+    mockGenerateOotdImage.mockRejectedValue(new MockGeminiError("boom"));
+
+    const res = await request(app)
+      .post("/api/ootd/image")
+      .set("Authorization", `Bearer ${validToken}`)
+      .send(body);
 
     expect(res.status).toBe(502);
   });

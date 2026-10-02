@@ -1,5 +1,12 @@
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// Deliberately a separate env var (and ideally a separate Gemini
+// project/key) from GEMINI_API_KEY above — image generation is billed far
+// more heavily than text/analysis calls, so keeping it on its own key makes
+// usage and cost easy to track independently. Falls back to GEMINI_API_KEY
+// so a single-key dev setup still works.
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+
 const PROMPT = `You are analyzing a photo of a single clothing item for a wardrobe app.
 Identify its dominant color(s), pattern, and fabric type.
 Respond with your best guess even if you're not fully certain.`;
@@ -234,9 +241,82 @@ async function generateOotdSuggestions({ items, weather }) {
   return { outfits };
 }
 
+function buildOotdImagePrompt({ occasion, note, weather, items }) {
+  const categoryList = items.map((item) => item.category).join(", ");
+
+  return `You are a fashion photographer composing a single outfit preview image for a styling app.
+
+You are given ${items.length} separate photos of real clothing items a user owns, in this order: ${categoryList}.
+
+TASK:
+Compose ONE new image that presents these exact garments together as a single, cohesive "${occasion}" outfit — as if laid out as a clean flat-lay or worn together on a plain-background model. Keep each garment's actual color, pattern, fit, and design faithful to its source photo; do not invent, substitute, or restyle the pieces themselves.
+
+CONTEXT:
+- Occasion: ${occasion}
+- Weather: ${weather.temperatureC}°C, ${weather.condition}
+- Styling note: ${note || "(none)"}
+
+STYLE:
+Soft, even studio lighting, plain neutral background, no text or watermarks, no extra garments beyond the ones provided.`;
+}
+
+// Calls Gemini's image model with the outfit's item photos and returns one
+// generated image composing them into a single outfit shot. Uses a
+// different model (and, recommended, a different API key) from the
+// text-only analysis/suggestion calls above, since image generation is
+// billed per output image. Throws GeminiError on any failure so the route
+// can turn it into a clean 502 without leaking upstream details.
+async function generateOotdImage({ occasion, note, items, weather }) {
+  const apiKey = process.env.GEMINI_IMAGE_API_KEY || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new GeminiError("GEMINI_IMAGE_API_KEY is not configured");
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`;
+
+  const imageParts = items.map((item) => ({
+    inline_data: { mime_type: item.mimeType, data: item.image },
+  }));
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [{ text: buildOotdImagePrompt({ occasion, note, weather, items }) }, ...imageParts],
+        },
+      ],
+      generationConfig: {
+        responseModalities: ["IMAGE"],
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new GeminiError(`Gemini request failed (${res.status}): ${body}`);
+  }
+
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((part) => part.inlineData || part.inline_data);
+  const inlineData = imagePart?.inlineData || imagePart?.inline_data;
+
+  if (!inlineData?.data) {
+    throw new GeminiError("Gemini response had no generated image");
+  }
+
+  return {
+    image: inlineData.data,
+    mimeType: inlineData.mimeType || inlineData.mime_type || "image/png",
+  };
+}
+
 module.exports = {
   analyzeClothingImage,
   generateOotdSuggestions,
+  generateOotdImage,
   OOTD_OCCASIONS,
   GeminiError,
 };
