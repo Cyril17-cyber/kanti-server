@@ -33,6 +33,57 @@ const RESPONSE_SCHEMA = {
 
 class GeminiError extends Error {}
 
+// Statuses worth retrying: 503 ("model overloaded"/high demand) and 429
+// (rate limited) are both transient — Gemini itself says these spikes are
+// "usually temporary" — and a brief retry turns many of them into a
+// successful response instead of a user-facing failure. 500 is included
+// since Google's own client libraries treat it the same way.
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 503]);
+const MAX_RETRIES = 3;
+// Overridable so tests can shrink the backoff instead of waiting out real
+// multi-second delays.
+const BASE_DELAY_MS = Number(process.env.GEMINI_RETRY_BASE_DELAY_MS) || 500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Exponential backoff with jitter: ~0.5-1s, ~1-1.5s, ~2-2.5s between the 4
+// total attempts, so a short-lived overload clears without the caller
+// waiting too long or hammering Gemini with immediate retries.
+function backoffDelayMs(attempt) {
+  return BASE_DELAY_MS * 2 ** attempt + Math.random() * BASE_DELAY_MS;
+}
+
+// Thin wrapper around fetch that retries transient Gemini failures (network
+// errors, 429/500/503) with backoff before giving up. Non-retryable
+// responses (2xx, or a 4xx that isn't rate limiting) are returned
+// immediately so callers can inspect `res.ok`/`res.status` as before.
+async function fetchGeminiWithRetry(url, options) {
+  let lastError;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      if (attempt === MAX_RETRIES) throw err;
+      await sleep(backoffDelayMs(attempt));
+      continue;
+    }
+
+    if (res.ok || !RETRYABLE_STATUS_CODES.has(res.status) || attempt === MAX_RETRIES) {
+      return res;
+    }
+
+    lastError = new Error(`Gemini request failed (${res.status})`);
+    await sleep(backoffDelayMs(attempt));
+  }
+
+  throw lastError;
+}
+
 // Calls Gemini's vision model on a single clothing photo and returns
 // structured wardrobe insights. Throws GeminiError on any failure so the
 // route can turn it into a clean 502 without leaking upstream details.
@@ -44,7 +95,7 @@ async function analyzeClothingImage(base64Image, mimeType) {
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
+  const res = await fetchGeminiWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -186,7 +237,7 @@ async function generateOotdSuggestions({ items, weather }) {
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
+  const res = await fetchGeminiWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -278,7 +329,7 @@ async function generateOotdImage({ occasion, note, items, weather }) {
     inline_data: { mime_type: item.mimeType, data: item.image },
   }));
 
-  const res = await fetch(url, {
+  const res = await fetchGeminiWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
