@@ -1,11 +1,20 @@
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
+// Tried whenever GEMINI_MODEL comes back with a 429 (quota/rate limit) or
+// exhausts its retries on a 500/503. Defaults to an older, more established
+// model specifically so that pointing GEMINI_MODEL at a newer/preview model
+// doesn't take down the whole feature when that model alone hits its daily
+// free-tier quota or capacity limits.
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
+
 // Deliberately a separate env var (and ideally a separate Gemini
 // project/key) from GEMINI_API_KEY above — image generation is billed far
 // more heavily than text/analysis calls, so keeping it on its own key makes
 // usage and cost easy to track independently. Falls back to GEMINI_API_KEY
 // so a single-key dev setup still works.
 const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+const GEMINI_IMAGE_FALLBACK_MODEL =
+  process.env.GEMINI_IMAGE_FALLBACK_MODEL || "gemini-2.5-flash-image";
 
 const PROMPT = `You are analyzing a photo of a single clothing item for a wardrobe app.
 Identify its dominant color(s), pattern, and fabric type.
@@ -33,12 +42,21 @@ const RESPONSE_SCHEMA = {
 
 class GeminiError extends Error {}
 
-// Statuses worth retrying: 503 ("model overloaded"/high demand) and 429
-// (rate limited) are both transient — Gemini itself says these spikes are
-// "usually temporary" — and a brief retry turns many of them into a
-// successful response instead of a user-facing failure. 500 is included
-// since Google's own client libraries treat it the same way.
-const RETRYABLE_STATUS_CODES = new Set([429, 500, 503]);
+// 500/503 ("model overloaded"/high demand) are short-lived — Gemini itself
+// says these spikes are "usually temporary" — so a brief same-model retry
+// often turns them into a success.
+//
+// 429 is NOT included here. On the free tier, 429 usually means
+// RESOURCE_EXHAUSTED on a per-day-per-model quota (e.g. 20 requests/day),
+// whose retryDelay is measured in HOURS — retrying the same model just burns
+// more of that already-exhausted daily quota for no benefit. A 429 instead
+// goes straight to the next model in fetchGeminiWithFallback, since a
+// different model has its own separate daily quota.
+const RETRY_STATUS_CODES = new Set([500, 503]);
+// Any of these on the current model means "try the next model" rather than
+// "give up" — includes 429 since a fallback model isn't affected by the
+// primary model's exhausted quota.
+const FALLBACK_STATUS_CODES = new Set([429, 500, 503]);
 const MAX_RETRIES = 3;
 // Overridable so tests can shrink the backoff instead of waiting out real
 // multi-second delays.
@@ -56,9 +74,9 @@ function backoffDelayMs(attempt) {
 }
 
 // Thin wrapper around fetch that retries transient Gemini failures (network
-// errors, 429/500/503) with backoff before giving up. Non-retryable
-// responses (2xx, or a 4xx that isn't rate limiting) are returned
-// immediately so callers can inspect `res.ok`/`res.status` as before.
+// errors, 500/503) with backoff before giving up. A 429, or any other
+// non-2xx, is returned immediately on the first attempt — see the note on
+// RETRY_STATUS_CODES above for why 429 specifically skips local retries.
 async function fetchGeminiWithRetry(url, options) {
   let lastError;
 
@@ -73,7 +91,7 @@ async function fetchGeminiWithRetry(url, options) {
       continue;
     }
 
-    if (res.ok || !RETRYABLE_STATUS_CODES.has(res.status) || attempt === MAX_RETRIES) {
+    if (res.ok || !RETRY_STATUS_CODES.has(res.status) || attempt === MAX_RETRIES) {
       return res;
     }
 
@@ -82,6 +100,34 @@ async function fetchGeminiWithRetry(url, options) {
   }
 
   throw lastError;
+}
+
+// Tries each model in order (retrying transient 500/503s within each one
+// via fetchGeminiWithRetry) and returns the first successful response. Moves
+// to the next model on a 429/500/503 that didn't resolve on the current
+// model; a non-fallback-worthy error (bad request, invalid model name, etc.)
+// is returned immediately without trying the fallback, since switching
+// models wouldn't fix it.
+async function fetchGeminiWithFallback(models, apiKey, options) {
+  const uniqueModels = [...new Set(models)];
+  let lastRes;
+  let lastErr;
+
+  for (const model of uniqueModels) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    try {
+      const res = await fetchGeminiWithRetry(url, options);
+      if (res.ok || !FALLBACK_STATUS_CODES.has(res.status)) {
+        return res;
+      }
+      lastRes = res;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (lastRes) return lastRes;
+  throw lastErr;
 }
 
 // Calls Gemini's vision model on a single clothing photo and returns
@@ -93,9 +139,7 @@ async function analyzeClothingImage(base64Image, mimeType) {
     throw new GeminiError("GEMINI_API_KEY is not configured");
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-  const res = await fetchGeminiWithRetry(url, {
+  const res = await fetchGeminiWithFallback([GEMINI_MODEL, GEMINI_FALLBACK_MODEL], apiKey, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -235,9 +279,7 @@ async function generateOotdSuggestions({ items, weather }) {
     throw new GeminiError("GEMINI_API_KEY is not configured");
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-  const res = await fetchGeminiWithRetry(url, {
+  const res = await fetchGeminiWithFallback([GEMINI_MODEL, GEMINI_FALLBACK_MODEL], apiKey, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -323,26 +365,31 @@ async function generateOotdImage({ occasion, note, items, weather }) {
     throw new GeminiError("GEMINI_IMAGE_API_KEY is not configured");
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${apiKey}`;
-
   const imageParts = items.map((item) => ({
     inline_data: { mime_type: item.mimeType, data: item.image },
   }));
 
-  const res = await fetchGeminiWithRetry(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: buildOotdImagePrompt({ occasion, note, weather, items }) }, ...imageParts],
+  const res = await fetchGeminiWithFallback(
+    [GEMINI_IMAGE_MODEL, GEMINI_IMAGE_FALLBACK_MODEL],
+    apiKey,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: buildOotdImagePrompt({ occasion, note, weather, items }) },
+              ...imageParts,
+            ],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
         },
-      ],
-      generationConfig: {
-        responseModalities: ["IMAGE"],
-      },
-    }),
-  });
+      }),
+    },
+  );
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
