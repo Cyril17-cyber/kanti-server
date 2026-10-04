@@ -56,24 +56,26 @@ describe("Gemini retry on transient failures", () => {
 
     const result = await analyzeClothingImage("base64data", "image/jpeg");
 
-    expect(result).toEqual({ colors: ["Navy"], pattern: "Solid", fabricType: "Cotton" });
+    expect(result).toEqual({
+      colors: ["Navy"],
+      pattern: "Solid",
+      fabricType: "Cotton",
+    });
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
   it("gives up and throws GeminiError after repeated 503s", async () => {
     const { analyzeClothingImage, GeminiError } = require("./gemini");
 
-    global.fetch = jest
-      .fn()
-      .mockResolvedValue(
-        jsonResponse(503, {
-          error: { code: 503, message: "high demand", status: "UNAVAILABLE" },
-        }),
-      );
-
-    await expect(analyzeClothingImage("base64data", "image/jpeg")).rejects.toBeInstanceOf(
-      GeminiError,
+    global.fetch = jest.fn().mockResolvedValue(
+      jsonResponse(503, {
+        error: { code: 503, message: "high demand", status: "UNAVAILABLE" },
+      }),
     );
+
+    await expect(
+      analyzeClothingImage("base64data", "image/jpeg"),
+    ).rejects.toBeInstanceOf(GeminiError);
     // 1 initial attempt + 3 retries = 4 total calls.
     expect(global.fetch).toHaveBeenCalledTimes(4);
   });
@@ -83,17 +85,19 @@ describe("Gemini retry on transient failures", () => {
 
     global.fetch = jest
       .fn()
-      .mockResolvedValue(jsonResponse(400, { error: { message: "bad request" } }));
+      .mockResolvedValue(
+        jsonResponse(400, { error: { message: "bad request" } }),
+      );
 
-    await expect(analyzeClothingImage("base64data", "image/jpeg")).rejects.toBeInstanceOf(
-      GeminiError,
-    );
+    await expect(
+      analyzeClothingImage("base64data", "image/jpeg"),
+    ).rejects.toBeInstanceOf(GeminiError);
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry a 429 on the same model, and goes straight to the fallback model", async () => {
     process.env.GEMINI_MODEL = "gemini-3.6-flash";
-    process.env.GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
+    process.env.GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
     const { analyzeClothingImage } = require("./gemini");
 
     // A daily free-tier quota 429 — retryDelay is in hours, so retrying the
@@ -102,7 +106,8 @@ describe("Gemini retry on transient failures", () => {
       error: {
         code: 429,
         status: "RESOURCE_EXHAUSTED",
-        message: "Quota exceeded for quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+        message:
+          "Quota exceeded for quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier",
       },
     });
     const success = jsonResponse(200, {
@@ -130,13 +135,21 @@ describe("Gemini retry on transient failures", () => {
 
     const result = await analyzeClothingImage("base64data", "image/jpeg");
 
-    expect(result).toEqual({ colors: ["Navy"], pattern: "Solid", fabricType: "Cotton" });
+    expect(result).toEqual({
+      colors: ["Navy"],
+      pattern: "Solid",
+      fabricType: "Cotton",
+    });
     // Exactly 2 calls total: one 429 on the primary model (no local retries
     // burning more of its exhausted daily quota), then one success on the
     // fallback model.
     expect(global.fetch).toHaveBeenCalledTimes(2);
-    expect(global.fetch.mock.calls[0][0]).toContain("gemini-3.6-flash:generateContent");
-    expect(global.fetch.mock.calls[1][0]).toContain("gemini-2.5-flash:generateContent");
+    expect(global.fetch.mock.calls[0][0]).toContain(
+      "gemini-3.6-flash:generateContent",
+    );
+    expect(global.fetch.mock.calls[1][0]).toContain(
+      "gemini-3.1-flash-lite:generateContent",
+    );
 
     delete process.env.GEMINI_MODEL;
     delete process.env.GEMINI_FALLBACK_MODEL;
@@ -144,7 +157,7 @@ describe("Gemini retry on transient failures", () => {
 
   it("falls back to GEMINI_FALLBACK_MODEL once the primary model exhausts its retries", async () => {
     process.env.GEMINI_MODEL = "gemini-3.6-flash";
-    process.env.GEMINI_FALLBACK_MODEL = "gemini-2.5-flash";
+    process.env.GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
     const { analyzeClothingImage } = require("./gemini");
 
     const overloaded = jsonResponse(503, {
@@ -180,10 +193,18 @@ describe("Gemini retry on transient failures", () => {
 
     const result = await analyzeClothingImage("base64data", "image/jpeg");
 
-    expect(result).toEqual({ colors: ["Navy"], pattern: "Solid", fabricType: "Cotton" });
+    expect(result).toEqual({
+      colors: ["Navy"],
+      pattern: "Solid",
+      fabricType: "Cotton",
+    });
     expect(global.fetch).toHaveBeenCalledTimes(5);
-    expect(global.fetch.mock.calls[0][0]).toContain("gemini-3.6-flash:generateContent");
-    expect(global.fetch.mock.calls[4][0]).toContain("gemini-2.5-flash:generateContent");
+    expect(global.fetch.mock.calls[0][0]).toContain(
+      "gemini-3.6-flash:generateContent",
+    );
+    expect(global.fetch.mock.calls[4][0]).toContain(
+      "gemini-3.1-flash-lite:generateContent",
+    );
 
     delete process.env.GEMINI_MODEL;
     delete process.env.GEMINI_FALLBACK_MODEL;

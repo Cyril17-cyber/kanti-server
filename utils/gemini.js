@@ -1,20 +1,22 @@
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
 
 // Tried whenever GEMINI_MODEL comes back with a 429 (quota/rate limit) or
 // exhausts its retries on a 500/503. Defaults to an older, more established
 // model specifically so that pointing GEMINI_MODEL at a newer/preview model
 // doesn't take down the whole feature when that model alone hits its daily
 // free-tier quota or capacity limits.
-const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash";
+const GEMINI_FALLBACK_MODEL =
+  process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
 
 // Deliberately a separate env var (and ideally a separate Gemini
 // project/key) from GEMINI_API_KEY above — image generation is billed far
 // more heavily than text/analysis calls, so keeping it on its own key makes
 // usage and cost easy to track independently. Falls back to GEMINI_API_KEY
 // so a single-key dev setup still works.
-const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+const GEMINI_IMAGE_MODEL =
+  process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-lite-image";
 const GEMINI_IMAGE_FALLBACK_MODEL =
-  process.env.GEMINI_IMAGE_FALLBACK_MODEL || "gemini-2.5-flash-image";
+  process.env.GEMINI_IMAGE_FALLBACK_MODEL || "gemini-3.1-flash-lite-image";
 
 const PROMPT = `You are analyzing a photo of a single clothing item for a wardrobe app.
 Identify its dominant color(s), pattern, and fabric type.
@@ -91,7 +93,11 @@ async function fetchGeminiWithRetry(url, options) {
       continue;
     }
 
-    if (res.ok || !RETRY_STATUS_CODES.has(res.status) || attempt === MAX_RETRIES) {
+    if (
+      res.ok ||
+      !RETRY_STATUS_CODES.has(res.status) ||
+      attempt === MAX_RETRIES
+    ) {
       return res;
     }
 
@@ -139,24 +145,28 @@ async function analyzeClothingImage(base64Image, mimeType) {
     throw new GeminiError("GEMINI_API_KEY is not configured");
   }
 
-  const res = await fetchGeminiWithFallback([GEMINI_MODEL, GEMINI_FALLBACK_MODEL], apiKey, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            { text: PROMPT },
-            { inline_data: { mime_type: mimeType, data: base64Image } },
-          ],
+  const res = await fetchGeminiWithFallback(
+    [GEMINI_MODEL, GEMINI_FALLBACK_MODEL],
+    apiKey,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: PROMPT },
+              { inline_data: { mime_type: mimeType, data: base64Image } },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: RESPONSE_SCHEMA,
         },
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
-      },
-    }),
-  });
+      }),
+    },
+  );
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -279,17 +289,21 @@ async function generateOotdSuggestions({ items, weather }) {
     throw new GeminiError("GEMINI_API_KEY is not configured");
   }
 
-  const res = await fetchGeminiWithFallback([GEMINI_MODEL, GEMINI_FALLBACK_MODEL], apiKey, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: buildOotdPrompt({ items, weather }) }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: OOTD_RESPONSE_SCHEMA,
-      },
-    }),
-  });
+  const res = await fetchGeminiWithFallback(
+    [GEMINI_MODEL, GEMINI_FALLBACK_MODEL],
+    apiKey,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: buildOotdPrompt({ items, weather }) }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: OOTD_RESPONSE_SCHEMA,
+        },
+      }),
+    },
+  );
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -379,7 +393,9 @@ async function generateOotdImage({ occasion, note, items, weather }) {
         contents: [
           {
             parts: [
-              { text: buildOotdImagePrompt({ occasion, note, weather, items }) },
+              {
+                text: buildOotdImagePrompt({ occasion, note, weather, items }),
+              },
               ...imageParts,
             ],
           },
